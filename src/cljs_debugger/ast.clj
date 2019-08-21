@@ -1,8 +1,7 @@
 (ns cljs-debugger.ast
   (:require [clojure.zip :as z]
             [clojure.pprint :refer [pprint *print-right-margin*]])
-  (:import [clojure.lang IPersistentList IPersistentMap IPersistentVector ISeq]
-           ))
+  (:import [clojure.lang IPersistentList IPersistentMap IPersistentVector ISeq]))
 
 ; Thx @ Alex Miller! http://www.ibm.com/developerworks/library/j-treevisit/
 (defmulti tree-branch? class)
