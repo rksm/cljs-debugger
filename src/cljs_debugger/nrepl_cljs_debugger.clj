@@ -7,16 +7,12 @@
             [nrepl.transport :as transport]
             [cljs-debugger.reading :as r]))
 
-(defonce last-msg (atom nil))
-(defonce init-debugger-message (atom nil))
-(defonce print-options (atom nil))
-
 ;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 ;; borrowed from cider.nrepl.middleware.debug
 (defn debugger-send
   "Send a response through debugger-message."
-  [& r]
-  (when (not @init-debugger-message)
+  [init-debugger-message & r]
+  (when (not init-debugger-message)
     (throw (Exception. "Debugger not initialized!")))
   (try
     (transport/send (:transport @init-debugger-message)
@@ -24,34 +20,55 @@
     (catch java.net.SocketException _
       (reset! init-debugger-message nil))))
 
-(defn- initialize
-  "Initialize the channel used for debug-input requests."
-  [{:keys [print-options] :as msg}]
-  (when (map? @init-debugger-message)
-    (debugger-send :status :done))
-  ;; The above is just bureaucracy. The below is important.
-  (reset! @#'print-options print-options)
-  (reset! init-debugger-message msg))
-
 ;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 
-(defn handle-cljs-debug
-  [handler {:keys [op] :as msg}]
-  (println "wrap-cljs-debugger" op)
-  (cond
-    (= op "init-debugger")
-    (do
-      (println "got init debugger")
-      (devtools/connect! {:on-break #(devtools/on-cljs-debugger-break %)
-                               :on-resume #(devtools/on-cljs-debugger-resume %)})
-      (devtools/nrepl-debug-init! msg)
-      (reset! init-debugger-message msg))
+(def ^:private ^:dynamic *initial-debugger-message* nil)
+(def ^:private ^:dynamic *devtools-connection* nil)
 
-    (= op "cljs-set-breakpoint")
-    (do
-      (transport/send (:transport msg) (response-for msg :status :done))
-      (reset! last-msg msg))
-    :else (handler msg)))
+(defn disconnect-devtools-from-session! [session]
+  (when-let [c (get @session #'*devtools-connection*)]
+    (swap! session assoc #'*devtools-connection* nil)
+    (devtools/disconnect! c)))
+
+(defonce last-devtools-session (atom nil))
+
+
+(defn connect-devtools-with-session!
+  ([session]
+   (connect-devtools-with-session! session (get @session #'*initial-debugger-message*)))
+  ([session initial-debug-message]
+   (disconnect-devtools-from-session! session)
+   (if-not initial-debug-message
+     (binding [*out* *err*]
+       (println "[cljs debugger] connect-devtools-with-session! does not have access to the initial debug message. Connection failed."))
+     (do
+       (reset! last-devtools-session session)
+       (swap! session assoc
+              #'*initial-debugger-message*
+              initial-debug-message
+              #'*devtools-connection*
+              (devtools/connect! {:on-break #(devtools/on-cljs-debugger-break % initial-debug-message)
+                                  :on-resume #(devtools/on-cljs-debugger-resume % initial-debug-message)
+                                  :nrepl-debug-init-msg initial-debug-message}))
+       (println "[cljs debugger] devtools connection established")))))
+
+(defn handle-cljs-debug
+  [handler {:keys [op session input] :as msg}]
+  ;; (println "wrap-cljs-debugger" op)
+  (case op
+    "init-debugger"
+    (connect-devtools-with-session! session msg)
+
+    "cljs-debugger-connect"
+    (connect-devtools-with-session! session)
+
+    "cljs-debugger-disconnect"
+    (disconnect-devtools-from-session! session)
+
+    ;; "debug-input" (when-let [pro ((-> @session ::input-promises (get (:key msg))))]
+    ;;                 (deliver pro input))
+
+    (handler msg)))
 
 
 (defn wrap-cljs-debugger [handler]
@@ -70,10 +87,12 @@
 
 (defn test-debugger []
 
-  (def frame (-> @devtools/break-events first :params :call-frames first))
-  (def cenv (-> @devtools/debugging-state :nrepl-debug-init-msg :session deref (get #'cider.piggieback/*cljs-compiler-env*)))
+  (def init-dbg (-> @@cljs-debugger.nrepl-cljs-debugger/last-devtools-session (get #'cljs-debugger.nrepl-cljs-debugger/*initial-debugger-message*)))
 
-  
+  (def frame (-> @devtools/break-events first :params :call-frames first))
+  (def cenv (-> init-dbg :session deref (get #'cider.piggieback/*cljs-compiler-env*)))
+
+
   ;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 
   (def frame-info (devtools/form-at-frame frame cenv))
@@ -94,7 +113,7 @@
     (println \"on click\")
     (js-debugger)
     (js/console.log (str msg \" clicked\"))))"
-                :id (-> @devtools/debugging-state :nrepl-debug-init-msg :id)
+                :id (-> init-dbg :id)
                 :file (.getCanonicalPath (:source-file closure-js-file))
                 :line (:line (meta top-level-form))
                 :column (dec (:column (meta top-level-form)))
@@ -109,7 +128,7 @@
 
   ;; (cider.nrepl.middleware.debug/read-debug-command coor nil {} STATE__)
 
-  (do (reset! cider.nrepl.middleware.debug/debugger-message (-> @devtools/debugging-state :nrepl-debug-init-msg)) nil)
+  ;; (do (reset! cider.nrepl.middleware.debug/debugger-message (-> @devtools/debugging-state :nrepl-debug-init-msg)) nil)
 
   ;; (:transport @cider.nrepl.middleware.debug/debugger-message)
 

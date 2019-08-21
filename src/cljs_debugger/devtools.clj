@@ -111,8 +111,6 @@
         stop-fn (fn []
                   (chrome-events/unlisten c :debugger :paused paused-chan)
                   (chrome-events/unlisten c :debugger :resumed resumed-chan)
-                  ;; (a/close! paused-chan)
-                  ;; (a/close! resumed-chan)
                   (a/close! stop-chan))]
     (a/go-loop []
       (a/alt!
@@ -121,16 +119,18 @@
                        (try
                          (on-break val)
                          (catch Exception e
-                           (binding [*out* *err*] (println "Error in on-break handler:" e)))))
+                           (binding [*out* *err*]
+                             (println "[cljs debugger] Error in on-break handler:" e)))))
                      (recur))
         resumed-chan ([val]
                       (when (fn? on-resume)
                         (try
                           (on-resume val)
                           (catch Exception e
-                            (binding [*out* *err*] (println "Error in on-resume handler:" e)))))
+                            (binding [*out* *err*]
+                              (println "[cljs debugger] Error in on-resume handler:" e)))))
                       (recur))
-        stop-chan (println "stopped")))
+        stop-chan (println "[cljs debugger] quiting event loop")))
     {:stop stop-fn
      :resumed-chan resumed-chan
      :paused-chan paused-chan}))
@@ -144,12 +144,17 @@
          chrome-events (setup-events c opts)]
      (chrome/set-current-connection! c)
      (chrome-dbg/enable c {})
+     (println (str "[cljs debugger] connected to " host ":" port))
      {:chrome-connection c
       :chrome-events chrome-events})))
 
 (defn disconnect [{:keys [chrome-connection chrome-events] :as state}]
-  (when-let [stop-events (some-> chrome-events :stop)] (stop-events))
-  (some-> chrome-connection :ws-connection .close)
+  (when-let [stop-events (some-> chrome-events :stop)]
+    (println "[cljs debugger] unsubscribing from devtools debug events")
+    (stop-events))
+  (when-let [websocket (some-> chrome-connection :ws-connection)]
+    (println "[cljs debugger] disconnecting from devtools websocket")
+    (.close websocket))
   (assoc state
          :chrome-connection nil
          :chrome-events nil))
@@ -171,18 +176,17 @@
    (connect! nil))
   ([opts]
    (disconnect!)
-   (swap! debugging-state merge (connect opts))
-   (println "cljs debugger is connected!")))
+   (swap! debugging-state merge (connect opts))))
 
 (defn nrepl-debug-init!
   [debug-init-msg]
   (swap! debugging-state assoc :nrepl-debug-init-msg debug-init-msg))
 
-(defn on-cljs-debugger-break [evt]
+(defn on-cljs-debugger-break [evt initial-debug-message]
   (swap! break-events conj evt)
   (println "on-break" evt))
 
-(defn on-cljs-debugger-resume [evt]
+(defn on-cljs-debugger-resume [evt initial-debug-message]
   (println "on-resume" evt))
 
 ;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
