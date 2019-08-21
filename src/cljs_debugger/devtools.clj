@@ -1,60 +1,16 @@
 (ns cljs-debugger.devtools
-  (:require [clj-chrome-devtools.core :as chrome]
+  (:require [clj-chrome-devtools.commands.debugger :as chrome-dbg]
+            [clj-chrome-devtools.core :as chrome]
             [clj-chrome-devtools.events :as chrome-events]
-            [clj-chrome-devtools.commands.page :as chrome-page]
-            [clj-chrome-devtools.commands.runtime :as chrome-rt]
-            [clj-chrome-devtools.commands.dom :as chrome-dom]
-            [clj-chrome-devtools.commands.debugger :as chrome-dbg]
-            [clj-chrome-devtools.commands.browser :as chrome-browser]
-            [clojure.core.async :as a]
-            [clojure.string :as s]
-            [clojure.java.io :as io]
-            [clojure.string :as s]
+            [cljs-debugger.reading :as r]
+            [cljs.analyzer.api :as ana-api]
             [cljs.source-map :as sm]
-            [clojure.data.json :as json]))
-
-
+            [clojure.core.async :as a]
+            [clojure.data.json :as json]
+            [clojure.java.io :as io]
+            [clojure.string :as s]))
 
 ;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
-
-
-(defn setup-events! [c {:keys [on-break on-resume]}]
-  (let [paused-chan (chrome-events/listen c :debugger :paused)
-        resumed-chan (chrome-events/listen c :debugger :resumed)
-        stop-chan (a/chan)
-        stop-fn (fn []
-                  (chrome-events/unlisten c :debugger :paused paused-chan)
-                  (chrome-events/unlisten c :debugger :resumed resumed-chan)
-                  ;; (a/close! paused-chan)
-                  ;; (a/close! resumed-chan)
-                  (a/close! stop-chan))]
-    (a/go-loop []
-      (a/alt!
-        paused-chan ([val]
-                     (when (fn? on-break)
-                       (try
-                         (on-break val)
-                         (catch Exception e
-                           (binding [*out* *err*] (println "Error in on-break handler:" e)))))
-                     (recur))
-        resumed-chan ([val]
-                      (when (fn? on-resume)
-                       (try
-                         (on-resume val)
-                         (catch Exception e
-                           (binding [*out* *err*] (println "Error in on-resume handler:" e)))))
-                      (recur))
-        stop-chan (println "stopped")))
-    {:stop stop-fn
-     :resumed-chan resumed-chan
-     :paused-chan paused-chan}))
-
-;; (let [c (a/chan) close (a/chan)]
-;;   (future (a/<!! (a/timeout 1000)) (a/close! close))
-;;   (future (a/<!! (a/timeout 500)) (a/put! c 23))
-;;   (a/go-loop [] (a/alt! c ([val] (println "og " val) (recur))
-;;                         close (println "closed"))))
-
 
 (defn js-file-of-frame
   "Takes the frame :url and converts it via cljs compiler env asset path and
@@ -111,12 +67,81 @@
         mapping (get sm orig-cljs-file-name-for-sm)]
     (source-map-lookup mapping line-no col-no)))
 
+;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+(defn form-at-frame
+  "Starting from a CDP frame from a debugger break location, tries to find a cljs
+  top-level form that represents the code at the break location. If found, the
+  returned form will contain meta data from indexed reading as well as the
+  source location in the coor vector form used by the cider debugger."
+  [frame cenv]
+  (let [js-file (js-file-of-frame frame cenv)
+        loc (->> frame :location ((juxt :line-number :column-number)))
+
+        sourcemap-file (source-map-of-js-file js-file)
+        closure-js-file (-> @cenv :cljs.closure/compiled-cljs (get (.getCanonicalPath js-file)))
+        ;; source-map-cljs-name (.getName (io/file (:source-url closure-js-file)))
+        ;; script-id (-> frame :location :script-id)
+        ;; call-frame-id (->> frame :call-frame-id)
+
+        sm (json/read-json (slurp sourcemap-file) true)
+        cljs-loc (apply source-map-lookup (sm/decode sm) loc)
+        ns-ast (ana-api/find-ns cenv (:ns closure-js-file))
+        ;; NOTE! defs in cljs have one-indexed lines!
+        defs (:defs ns-ast)
+        top-level-def (let [cljs-line (inc (:line cljs-loc))]
+                        (first
+                         (for [[_ def] (reverse defs)
+                               :when (<= (:line def) cljs-line)]
+                           def)))
+        top-level-form (r/read-top-level-form-of-def-from-file
+                        top-level-def
+                        (:source-url closure-js-file))]
+    {:top-level-form top-level-form
+     :closure-js-file closure-js-file
+     :cljs-loc cljs-loc}))
+
+
+;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+(defn setup-events [c {:keys [on-break on-resume]}]
+  (let [paused-chan (chrome-events/listen c :debugger :paused)
+        resumed-chan (chrome-events/listen c :debugger :resumed)
+        stop-chan (a/chan)
+        stop-fn (fn []
+                  (chrome-events/unlisten c :debugger :paused paused-chan)
+                  (chrome-events/unlisten c :debugger :resumed resumed-chan)
+                  ;; (a/close! paused-chan)
+                  ;; (a/close! resumed-chan)
+                  (a/close! stop-chan))]
+    (a/go-loop []
+      (a/alt!
+        paused-chan ([val]
+                     (when (fn? on-break)
+                       (try
+                         (on-break val)
+                         (catch Exception e
+                           (binding [*out* *err*] (println "Error in on-break handler:" e)))))
+                     (recur))
+        resumed-chan ([val]
+                      (when (fn? on-resume)
+                        (try
+                          (on-resume val)
+                          (catch Exception e
+                            (binding [*out* *err*] (println "Error in on-resume handler:" e)))))
+                      (recur))
+        stop-chan (println "stopped")))
+    {:stop stop-fn
+     :resumed-chan resumed-chan
+     :paused-chan paused-chan}))
+
+
 (defn connect
   ([]
    (connect nil))
   ([{:keys [host port] :or {host "localhost" port 9222} :as opts}]
    (let [c (chrome/connect host port)
-         chrome-events (setup-events! c opts)]
+         chrome-events (setup-events c opts)]
      (chrome/set-current-connection! c)
      (chrome-dbg/enable c {})
      {:chrome-connection c
@@ -129,105 +154,47 @@
          :chrome-connection nil
          :chrome-events nil))
 
+;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+(defonce break-events (atom []))
+
+(defonce debugging-state (atom {:chrome-connection nil
+                                :chrome-events nil
+                                :nrepl-debug-init-msg nil}))
+
+(defn disconnect! []
+  (swap! debugging-state merge (disconnect @debugging-state)))
+
+
+(defn connect!
+  ([]
+   (connect! nil))
+  ([opts]
+   (disconnect!)
+   (swap! debugging-state merge (connect opts))
+   (println "cljs debugger is connected!")))
+
+(defn nrepl-debug-init!
+  [debug-init-msg]
+  (swap! debugging-state assoc :nrepl-debug-init-msg debug-init-msg))
+
+(defn on-cljs-debugger-break [evt]
+  (swap! break-events conj evt)
+  (println "on-break" evt))
+
+(defn on-cljs-debugger-resume [evt]
+  (println "on-resume" evt))
+
+;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 
 (comment
-  (chrome-browser/get-version c {})
 
+  (disconnect!)
+  (connect!)
 
-  (def c (chrome/connect "localhost" 9222))
-  (chrome/set-current-connection! c)
-  (setup-events! c {})
+  (require '[clj-chrome-devtools.commands.debugger :as chrome-dbg])
 
-  (chrome-dbg/enable c {})
-  (chrome-dbg/pause c {})
-
-  (require 'clj-chrome-devtools.commands.target)
-  (clj-chrome-devtools.commands.target/get-targets c {})
-  (clj-chrome-devtools.commands.target/get-targets c {})
-  (clj-chrome-devtools.commands.target/activate-target c {:target-id "B1AC9C50106F4DCB7D5EE52ED475A72D"})
-  (clj-chrome-devtools.commands.target/set-auto-attach c {:auto-attach false :wait-for-debugger-on-start false})
-
-
-  (chrome-page/navigate c {:url "http://webjure.org/"})
-  (chrome-page/navigate c {:url "http://robert.kra.hn"})
-  (chrome-page/navigate c {:url "http://localhost:8080"})
-  (chrome-page/navigate c {:url "http://localhost:9500"})
-
-
-
-  (def frame
-    (let [evt (-> @event-state :events deref last)]
-      (-> evt :params :call-frames first)))
-
-  (def script-id (-> frame :location :script-id))
-  (def loc (->> frame :location ((juxt :line-number :column-number)) (map inc)))
-  (def call-frame-id (->> frame :call-frame-id))
-
-  (def frame-file (js-file-of-frame frame cljs-debugger.build/cenv))
-  (def js-file (cljs.closure/read-js js-file))
-  (def js-file-source-map (source-map-of-js-file frame-file))
-
-
-
-
-  (chrome-rt/get-properties c {:object-id (-> frame :scope-chain first :object :object-id)})
-
+  (def c (-> @debugging-state :chrome-connection))
   (chrome-dbg/resume c {})
 
-  (chrome-dbg/step-over c {})
-  (chrome-dbg/step-into c {})
-  (chrome-dbg/step-out c {})
-
-  (chrome-dbg/evaluate-on-call-frame c {:expression "msg" :call-frame-id call-frame-id :silent true})
-  (chrome-dbg/evaluate-on-call-frame c {:expression "this" :call-frame-id call-frame-id :silent true})
-
-
-  (print (chrome-dbg/get-script-source c {:script-id script-id}))
-
-  (def script-source (:script-source (chrome-dbg/get-script-source c {:script-id script-id})))
-
-  123
-
-  (def source-map-file (second (re-find #"//# sourceMappingURL=(.*)$" (first (reverse (s/split-lines script-source))))))
-
-
-  (import '[com.google.debugging.sourcemap SourceMapConsumerV3])
-
-
-  (def sm (SourceMapConsumerV3.))
-  (def sm-file (io/file source-map-file))
-  (.parse sm-consumer (slurp sm-file))
-  (def mapping (.getMappingForLine sm-consumer line column))
-
-  ;; https://webcache.googleusercontent.com/search?q=cache:OObj9op5xZEJ:https://clojureverse.org/t/server-side-decoding-of-javascriptsourcemaps/1591+&cd=11&hl=en&ct=clnk&gl=de&lr=lang_de%7Clang_en&client=ubuntu
-  (defn lookup [source-map-file line column]
-    (let [sm-consumer (SourceMapConsumerV3.)
-          sm-file (io/file source-map-file)]
-      (.parse sm-consumer (slurp sm-file))
-      (when-let [mapping (.getMappingForLine sm-consumer line column)]
-        {:original (.getOriginalFile mapping)
-         :line (.getLineNumber mapping)
-         :column (.getColumnPosition mapping)}
-        )))
-
-  (lookup "./resources/public/js/cljs_debugger/browser.js.map" 6 65)
-  (lookup "./resources/public/js/cljs_debugger/browser.js.map" 9 24)
-  (apply lookup "./resources/public/js/cljs_debugger/browser.js.map" loc)
-  (apply lookup js-file-source-map loc)
-  ;; => {:original "core.cljs", :line 3767, :column 5}
-
-  (lookup "./resources/public/js/cljs_debugger/browser.js.map" 9 1)
-
-  (slurp (io/file "./resources/public/js/cljs_debugger/browser.js.map"))
-
-
-
-
-  ;; source map via cljs.source-map
-  (require '[clojure.data.json :as json])
-  (into (sorted-map-by <)
-        (cljs.source-map/decode
-         (json/read-str
-          (slurp "resources/public/js/cljs/core.js.map")
-          :key-fn keyword)))
   )

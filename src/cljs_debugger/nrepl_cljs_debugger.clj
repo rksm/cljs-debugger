@@ -1,10 +1,11 @@
 (ns cljs-debugger.nrepl-cljs-debugger
-  (:require cider.nrepl.middleware.debug
+  (:require [cljs-debugger.devtools :as devtools]
+            cider.nrepl.middleware.debug
             [cider.piggieback :refer [wrap-cljs-repl]]
-            [cljs-debugger.cljs-debugger :as cljs-debugger]
             [nrepl.middleware :as middleware :refer [set-descriptor!]]
             [nrepl.misc :refer [response-for]]
-            [nrepl.transport :as transport]))
+            [nrepl.transport :as transport]
+            [cljs-debugger.reading :as r]))
 
 (defonce last-msg (atom nil))
 (defonce init-debugger-message (atom nil))
@@ -41,9 +42,9 @@
     (= op "init-debugger")
     (do
       (println "got init debugger")
-      (cljs-debugger/connect! {:on-break #(cljs-debugger/on-cljs-debugger-break %)
-                               :on-resume #(cljs-debugger/on-cljs-debugger-resume %)})
-      (cljs-debugger/nrepl-debug-init! msg)
+      (devtools/connect! {:on-break #(devtools/on-cljs-debugger-break %)
+                               :on-resume #(devtools/on-cljs-debugger-resume %)})
+      (devtools/nrepl-debug-init! msg)
       (reset! init-debugger-message msg))
 
     (= op "cljs-set-breakpoint")
@@ -69,13 +70,13 @@
 
 (defn test-debugger []
 
-  (def frame (-> @cljs-debugger/break-events first :params :call-frames first))
-  (def cenv (-> @cljs-debugger/debugging-state :nrepl-debug-init-msg :session deref (get #'cider.piggieback/*cljs-compiler-env*)))
+  (def frame (-> @devtools/break-events first :params :call-frames first))
+  (def cenv (-> @devtools/debugging-state :nrepl-debug-init-msg :session deref (get #'cider.piggieback/*cljs-compiler-env*)))
 
   
   ;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 
-  (def frame-info (cljs-debugger/form-at-frame frame cenv))
+  (def frame-info (devtools/form-at-frame frame cenv))
 
   (def  top-level-form (:top-level-form frame-info))
   (def  closure-js-file (:closure-js-file frame-info))
@@ -93,7 +94,7 @@
     (println \"on click\")
     (js-debugger)
     (js/console.log (str msg \" clicked\"))))"
-                :id (-> @cljs-debugger/debugging-state :nrepl-debug-init-msg :id)
+                :id (-> @devtools/debugging-state :nrepl-debug-init-msg :id)
                 :file (.getCanonicalPath (:source-file closure-js-file))
                 :line (:line (meta top-level-form))
                 :column (dec (:column (meta top-level-form)))
@@ -108,7 +109,7 @@
 
   ;; (cider.nrepl.middleware.debug/read-debug-command coor nil {} STATE__)
 
-  (do (reset! cider.nrepl.middleware.debug/debugger-message (-> @cljs-debugger/debugging-state :nrepl-debug-init-msg)) nil)
+  (do (reset! cider.nrepl.middleware.debug/debugger-message (-> @devtools/debugging-state :nrepl-debug-init-msg)) nil)
 
   ;; (:transport @cider.nrepl.middleware.debug/debugger-message)
 
@@ -141,7 +142,7 @@
   (test-debugger)
 
 
-  (def f (cljs-debugger/form-at-frame frame cenv))
+  (def f (devtools/form-at-frame frame cenv))
 
   (map meta forms-found)
 
