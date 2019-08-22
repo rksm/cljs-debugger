@@ -7,11 +7,10 @@
 (println "running")
 
 (defn on-click [_evt]
-  (let [msg "you"]
-    (println "on click")
-    (js-debugger)
-    (js/console.log (str msg " clicked"))))
-
+  (println "on click")
+  (js-debugger)
+  (let [n (.-length (js/document.querySelectorAll "*"))]
+    (js/console.log (str "there are " n " elments in the DOM"))))
 
 (defonce on-click-registered
   (do (.addEventListener js/document "click" on-click) on-click))

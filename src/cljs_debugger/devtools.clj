@@ -1,4 +1,5 @@
 (ns cljs-debugger.devtools
+  (:refer-clojure :exclude [next])
   (:require [clj-chrome-devtools.commands.debugger :as chrome-dbg]
             [clj-chrome-devtools.core :as chrome]
             [clj-chrome-devtools.events :as chrome-events]
@@ -69,7 +70,24 @@
 
 ;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 
-(defn form-at-frame
+(defn find-more-precise-loc [js-file from-line name]
+  (let [rdr (io/reader js-file)]
+    (doall (repeatedly from-line #(.readLine rdr)))
+    (loop [line from-line]
+      (let [line-string (.readLine rdr)
+            col (and line-string (s/index-of line name))]
+        (cond
+          (nil? line-string) nil
+          col {:line line :col col}
+          :else (recur (inc line)))))))
+
+(defn find-more-precise-loc-logged [js-file from-line name]
+  (let [r (find-more-precise-loc js-file from-line name)]
+    (println from-line r)
+    r))
+
+
+(defn analyze-frame
   "Starting from a CDP frame from a debugger break location, tries to find a cljs
   top-level form that represents the code at the break location. If found, the
   returned form will contain meta data from indexed reading as well as the
@@ -85,22 +103,60 @@
         ;; call-frame-id (->> frame :call-frame-id)
 
         sm (json/read-json (slurp sourcemap-file) true)
-        cljs-loc (apply source-map-lookup (sm/decode sm) loc)
+        {:keys [line col name] :as cljs-loc} (apply source-map-lookup (sm/decode sm) loc)
+        _ (println name [line col])
+        [line col] (if-let [{:keys [line col]} (and name (find-more-precise-loc-logged (:url closure-js-file) line name))]
+                     [line col]
+                     [line col])
+        _ (println "vs" [line col])
         ns-ast (ana-api/find-ns cenv (:ns closure-js-file))
         ;; NOTE! defs in cljs have one-indexed lines!
-        defs (:defs ns-ast)
-        top-level-def (let [cljs-line (inc (:line cljs-loc))]
+        defs (sort-by (comp - :line) (vals (:defs ns-ast)))
+        top-level-def (let [cljs-line (inc line)]
                         (first
-                         (for [[_ def] (reverse defs)
+                         (for [def defs
                                :when (<= (:line def) cljs-line)]
                            def)))
         top-level-form (r/read-top-level-form-of-def-from-file
                         top-level-def
-                        (:source-url closure-js-file))]
-    {:top-level-form top-level-form
+                        (:source-url closure-js-file))
+        form (or (r/find-nested-form-closest (inc line) (inc col) top-level-form)
+                 top-level-form)]
+    ;; (sc.api/spy)
+    {:frame frame
+     :top-level-form top-level-form
+     :form form
      :closure-js-file closure-js-file
      :cljs-loc cljs-loc}))
 
+(comment
+
+  (import '[com.google.debugging.sourcemap SourceMapConsumerV3])
+
+  (defn lookup [source-map-file line column]
+    (let [sm-consumer (SourceMapConsumerV3.)
+          sm-file (io/file source-map-file)]
+      (.parse sm-consumer (slurp sm-file))
+      (when-let [mapping (.getMappingForLine sm-consumer line column)]
+        {:original (.getOriginalFile mapping)
+         :line (.getLineNumber mapping)
+         :column (.getColumnPosition mapping)}
+        )))
+
+  (apply lookup sourcemap-file loc)
+
+
+  (sc.api/defsc 6)
+  cljs-loc
+  loc
+  (sc.api/letsc 5 [loc])
+  (sc.api/letsc 6 [loc])
+
+  
+  (def line-to-find (-> cljs-loc :line inc))
+  (def col-to-find (-> cljs-loc :col inc))
+  (def form (r/find-nested-form-closest line-to-find col-to-find top-level-form))
+  (or (r/find-nested-form-closest line-to-find col-to-find top-level-form) top-level-form))
 
 ;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 
@@ -161,14 +217,15 @@
 
 ;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 
-(defonce break-events (atom []))
-
 (defonce debugging-state (atom {:chrome-connection nil
                                 :chrome-events nil
                                 :nrepl-debug-init-msg nil}))
 
-(defn disconnect! []
-  (swap! debugging-state merge (disconnect @debugging-state)))
+(defn disconnect!
+  ([]
+   (disconnect! @debugging-state))
+  ([connection]
+   (swap! debugging-state merge (disconnect connection))))
 
 
 (defn connect!
@@ -178,18 +235,30 @@
    (disconnect!)
    (swap! debugging-state merge (connect opts))))
 
-(defn nrepl-debug-init!
-  [debug-init-msg]
-  (swap! debugging-state assoc :nrepl-debug-init-msg debug-init-msg))
-
-(defn on-cljs-debugger-break [evt initial-debug-message]
-  (swap! break-events conj evt)
-  (println "on-break" evt))
-
-(defn on-cljs-debugger-resume [evt initial-debug-message]
-  (println "on-resume" evt))
-
 ;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+(defn enable
+  [{:keys [chrome-connection] :as _debugging-state}]
+  (chrome-dbg/enable chrome-connection {}))
+
+(defn disable
+  [{:keys [chrome-connection] :as _debugging-state}]
+  (chrome-dbg/disable chrome-connection {}))
+
+(defn resume
+  [{:keys [chrome-connection] :as _debugging-state}]
+  (chrome-dbg/resume chrome-connection {}))
+
+(defn next
+  [{:keys [chrome-connection] :as _debugging-state}]
+  (chrome-dbg/step-over chrome-connection {}))
+
+(defn quit
+  [debugging-state]
+  (disable debugging-state)
+  (a/go (a/<! (a/timeout 500))
+        (enable debugging-state)))
+
 
 (comment
 

@@ -53,7 +53,8 @@
   (clojure.walk/postwalk
    (juxt identity meta)
    (reader/read
-    (reader-types/indexing-push-back-reader "(foo bar)")))
+    (reader-types/source-logging-push-back-reader
+     (reader-types/indexing-push-back-reader "(foo (bar))"))))
 
   (meta (reader-types/log-source
          (reader/read-string "(foo bar)"))))
@@ -63,8 +64,9 @@
 (defn read-indexed
   "via tools.reader"
   [file]
-  (let [file-reader (reader-types/indexing-push-back-reader
-                     (io/reader file))]
+  (let [file-reader (reader-types/source-logging-push-back-reader
+                     (reader-types/indexing-push-back-reader
+                      (io/reader file)))]
     (take-while (partial not= ::end)
                 (repeatedly #(reader/read file-reader nil ::end)))))
 

@@ -1,12 +1,12 @@
 {:deps {org.clojure/clojurescript {:local/root "/home/robert/projects/clojure/2019-08-18_cljs-debugger/clojurescript"}
         clj-chrome-devtools {:mvn/version "20190601"}
         ;; cider/cider-nrepl {:local/root "/home/robert/projects/clojure/third-party/cider-nrepl"}
-        cider/cider-nrepl {:mvn/version "0.22.0-beta10"}
+        cider/cider-nrepl {:mvn/version "0.22.0-beta11"}
         cider/piggieback {:mvn/version "RELEASE"}
-        org.clojure/core.async {:mvn/version "0.4.500"}
-        com.bhauman/figwheel-main {:mvn/version "RELEASE"}}
+        org.clojure/core.async {:mvn/version "0.4.500"}}
 
  :paths ["src" "resources" "target"]
  :aliases {:dev {:extra-deps {refactor-nrepl {:mvn/version "2.5.0-SNAPSHOT"}
-                              vvvvalvalval/scope-capture {:mvn/version "RELEASE"}}
+                              vvvvalvalval/scope-capture {:mvn/version "RELEASE"}
+                              com.bhauman/figwheel-main {:mvn/version "RELEASE"}}
                  :main-opts ["-m" "cljs-debugger.nrepl"]}}}
