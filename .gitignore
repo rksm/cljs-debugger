@@ -1,3 +1,7 @@
 checkouts
 .cpcache
 target/
+test-project/target
+test-project/.cpcache
+test-project/chrome-user-profile
+test-project/checkouts

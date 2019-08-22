@@ -1,0 +1,4 @@
+^{:watch-dirs ["src"]
+  :hot-reload-cljs true
+  :open-url false}
+{:main cljs-debugger-example.core}

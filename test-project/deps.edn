@@ -1,0 +1,11 @@
+{:deps {org.clojure/clojure {:mvn/version "1.10.1"}
+        org.clojure/clojurescript {:mvn/version "1.10.520"}
+        com.bhauman/figwheel-main {:mvn/version "RELEASE"}}
+
+ :paths ["src" "dev" "target" "resources"]
+
+ :aliases {:cider
+           {:extra-deps {cider/cider-nrepl {:mvn/version "0.22.0-beta11"}
+                         org.rksm/cljs-debugger {:local/root "/home/robert/projects/clojure/2019-08-18_cljs-debugger/cljs-debugger"}
+                         refactor-nrepl {:mvn/version "2.5.0-SNAPSHOT"}
+                         vvvvalvalval/scope-capture {:mvn/version "RELEASE"}}}}}
