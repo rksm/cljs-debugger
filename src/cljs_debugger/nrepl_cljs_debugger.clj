@@ -3,12 +3,14 @@
             [cider.piggieback :refer [wrap-cljs-repl]]
             [cljs-debugger.devtools :as devtools]
             [cljs-debugger.reading :as r]
-            [clojure.pprint :refer [cl-format]]
+            [clojure.pprint :refer [cl-format pprint]]
             [nrepl.middleware :as middleware :refer [set-descriptor!]]
             [nrepl.misc :refer [response-for]]
             [nrepl.transport :as transport]
             [clojure.java.io :as io]
-            [clojure.string :as s]))
+            [clojure.string :as s]
+            [cider.nrepl.middleware.inspect :refer [swap-inspector!]]
+            [orchard.inspect :as inspect]))
 
 (def ^:private ^:dynamic *initial-debugger-message* nil)
 (def ^:private ^:dynamic *devtools-connection* nil)
@@ -28,7 +30,7 @@
   (def frame-info (-> @@last-devtools-session (get #'*last-break*)))
 
   ;; false {:line 27, :col 4, :source core.cljs, :name seq__35004} {:line 27, :col 4, :source core.cljs, :name chunk__35005}
-;; false {:line 27, :col 4, :source core.cljs, :name seq__35072} {:line 27, :col 4, :source core.cljs, :name chunk__35073}
+  ;; false {:line 27, :col 4, :source core.cljs, :name seq__35072} {:line 27, :col 4, :source core.cljs, :name chunk__35073}
 
   (-> frame-info :frame :location)
   (def src (slurp (-> frame-info :closure-js-file :url)))
@@ -134,6 +136,17 @@
     (binding [*ns* (find-ns (symbol (:original-ns dbg-state)))]
       (try (read-string @input)
            (finally (swap! cider.nrepl.middleware.debug/promises dissoc key))))))
+
+(defn- debug-inspect
+  "Inspect `inspect-value`."
+  [page-size inspect-value initial-debugger-message-atom]
+  (binding [*print-length* nil
+            *print-level* nil]
+    (->> #(inspect/start (assoc % :page-size page-size) inspect-value)
+         ;; FIXME
+         (swap-inspector! initial-debugger-message-atom)
+         :rendered pr-str)))
+
 ;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 ;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 ;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
@@ -141,7 +154,9 @@
 
 
 (defn wait-for-input
-  [frame-info initial-debug-message]
+  [frame-info initial-debug-message locals]
+
+  (pprint locals)
 
   (let [{:keys [top-level-form form closure-js-file]} frame-info
         coor (-> form meta :coor)
@@ -158,7 +173,7 @@
                  :coor coor
                  ;; :skip false
                  :forms nil
-                 :locals {}
+                 :locals locals
                  :debug-value (pr-str (-> frame-info :frame :return-value))}
         inputs    {"n" :next,
                    "s" :stacktrace,
@@ -172,20 +187,20 @@
                    "l" :locals,
                    "h" :here,
                    "o" :out,
-                   "c" :continue}]
-
-    (println "sending read-debug-input request" msg-id)
-    (let [debug-input (read-debug-input initial-debug-message STATE__ inputs nil)
-          devtools-connection (-> initial-debug-message :session deref (get #'*devtools-connection*))]
-      (prn "got debug input" debug-input)
-      (case debug-input
-        :continue (devtools/resume devtools-connection)
-        :next (devtools/next devtools-connection)
-        :quit (devtools/quit devtools-connection)
-        (do
-          (cl-format true "can't deal with debug-input ~s, resuming" debug-input)
-          (devtools/resume devtools-connection))
-        ))))
+                   "c" :continue}
+        debug-input (read-debug-input initial-debug-message STATE__ inputs nil)
+        session (-> initial-debug-message :session)
+        devtools-connection (get @session #'*devtools-connection*)]
+    ;; (prn "got debug input" debug-input)
+    (case debug-input
+      :continue (devtools/resume devtools-connection)
+      :next (devtools/next devtools-connection)
+      :quit (devtools/quit devtools-connection)
+      :locals (->> (debug-inspect 32 locals (get @session #'*initial-debugger-message*)))
+      (do
+        (cl-format true "can't deal with debug-input ~s, resuming" debug-input)
+        (devtools/resume devtools-connection))
+      )))
 
 ;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 
@@ -200,6 +215,10 @@
   (def sourcemap-file (devtools/source-map-of-js-file js-file))
 )
 
+(defn- same-position? [frame-info-a frame-info-b]
+  (= ((juxt :line :col) (:cljs-loc frame-info-a))
+     ((juxt :line :col) (:cljs-loc frame-info-b))))
+
 (defn on-cljs-debugger-break [evt initial-debug-message]
   (println "on-break")
   (swap! break-events conj evt)
@@ -213,14 +232,15 @@
           (println "[cljs debugger] break requested but no compiler env found in session")
           (devtools/resume devtools-connection))
         (let [frame (-> evt :params :call-frames first)
-              frame-info (devtools/analyze-frame frame cenv)]
+              frame-info (devtools/analyze-frame frame cenv)
+              locals (devtools/locals frame-info devtools-connection)]
           (swap! session assoc #'*last-break* frame-info)
-          (println (= (:cljs-loc last-frame-info) (:cljs-loc frame-info)) (:cljs-loc last-frame-info) (:cljs-loc frame-info))
-          (if (= (:cljs-loc last-frame-info) (:cljs-loc frame-info))
+          ;; (println (= (:cljs-loc last-frame-info) (:cljs-loc frame-info)) (:cljs-loc last-frame-info) (:cljs-loc frame-info))
+          (if (same-position? last-frame-info frame-info)
             (do
               (println "Stopped at same location before, skipping break")
               (devtools/next devtools-connection))
-            (wait-for-input frame-info initial-debug-message))))
+            (wait-for-input frame-info initial-debug-message locals))))
       (catch Exception e
         (binding [*out* *err*] (println "error when requesting break:" e))
         (devtools/resume devtools-connection)))))

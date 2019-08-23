@@ -14,8 +14,8 @@
 
 (defn start-clj-nrepl-server []
   (let [middlewares (map resolve cider.nrepl/cider-middleware)
-        middlewares (if-let [rf wrap-refactor]
-                      (conj middlewares rf) middlewares)
+        ;; middlewares (if-let [rf wrap-refactor]
+        ;;               (conj middlewares rf) middlewares)
         handler (apply nrepl.server/default-handler middlewares)]
     (pprint middlewares)
     (reset! clj-nrepl-server (nrepl.server/start-server :handler handler :port 7888)))
@@ -67,7 +67,6 @@
 
 (defn -main [& _args]
   (start-clj-nrepl-server)
-
   (start-cljs-nrepl-server)
   ;; (start-cljs-nrepl-client)
   ;; (cljs-send-eval "(require 'figwheel.main) (figwheel.main/start :fig)")

@@ -2,7 +2,7 @@
         org.clojure/clojurescript {:mvn/version "1.10.520"}
         com.bhauman/figwheel-main {:mvn/version "RELEASE"}}
 
- :paths ["src" "dev" "target" "resources"]
+ :paths ["src" "resources"]
 
  :aliases {:cider
            {:extra-deps {cider/cider-nrepl {:mvn/version "0.22.0-beta11"}

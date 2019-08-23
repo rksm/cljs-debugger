@@ -9,7 +9,8 @@
             [clojure.core.async :as a]
             [clojure.data.json :as json]
             [clojure.java.io :as io]
-            [clojure.string :as s]))
+            [clojure.string :as s]
+            [clj-chrome-devtools.commands.runtime             :as runtime             ]))
 
 ;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 
@@ -36,31 +37,55 @@
     (when map-name
       (io/file (.getParentFile frame-file) map-name))))
 
+(declare find-more-precise-loc-logged)
+
 (defn source-map-lookup
   "`line-no` and `row-no` are zero-based."
   ;; [orig-cljs-file-name source-map-file line-no col-no]
-  [mapping line-no col-no]
-  (let [exact-row (get mapping line-no)
-        exact-col (get exact-row col-no)
+  [mapping line col]
+  (let [exact-row (get mapping line)
+        exact-col (get exact-row col)
 
         exact-match (and exact-col (first exact-col))
         prev-in-row (and
                      (not exact-match)
-                     (-> (for [col (range (dec col-no) -1 -1)
+                     (-> (for [col (range (dec col) -1 -1)
                                :let [entry (get exact-row col)]
                                :when entry]
                            entry)
                          first
                          first))
-        prev-row (-> (for [row (range (dec line-no) -1 -1)
+        prev-row (-> (for [row (range (dec line) -1 -1)
                            :let [entry (get mapping row)]
                            :when entry]
                        entry)
                      first vals last last)]
     (or exact-match prev-in-row prev-row)))
 
+(defn source-map-lookup-from-file
+  ""
+  [js-file line col]
+  (let [sourcemap-file (source-map-of-js-file js-file)
+        sm (json/read-json (slurp sourcemap-file) true)
+        mapping (sm/decode sm)]
+    (source-map-lookup mapping line col)))
+
+#_(defn clever-source-map-lookup
+  [js-file closure-js-file line col]
+  (let [sourcemap-file (source-map-of-js-file js-file)
+        sm (json/read-json (slurp sourcemap-file) true)
+        mapping (sm/decode sm)
+        lookup (source-map-lookup mapping line col)]
+    (when-let [{:keys [line col name]} lookup]
+      (if-let [lookup-2 (and name
+                             (find-more-precise-loc-logged
+                              (:url closure-js-file) line name))]
+        (do (println "--- Found better sourcemap location" lookup "vs" lookup-2 "and" (source-map-lookup mapping (:line lookup-2) (:col lookup-2)) "(" line "," col ")")
+            lookup)
+        lookup))))
+
+
 (defn source-map-lookup-reverse
-  "`line-no` and `row-no` are one-based."
   [orig-cljs-file-name source-map-file line-no col-no]
   (let [orig-cljs-file-name-for-sm orig-cljs-file-name
         sm (sm/decode-reverse (json/read-json (slurp source-map-file) true))
@@ -70,12 +95,23 @@
 
 ;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
 
+#_(defn find-more-precise-loc [js-file from-line name]
+  (let [token (str "var " name)
+        rdr (io/reader js-file)]
+    (loop [line 0]
+      (let [line-string (.readLine rdr)
+            found? (and line-string (s/starts-with? line-string token))]
+        (cond
+          (nil? line-string) nil
+          found? {:line line :col 0}
+          :else (recur (inc line)))))))
+
 (defn find-more-precise-loc [js-file from-line name]
   (let [rdr (io/reader js-file)]
     (doall (repeatedly from-line #(.readLine rdr)))
     (loop [line from-line]
       (let [line-string (.readLine rdr)
-            col (and line-string (s/index-of line name))]
+            col (and line-string (s/index-of line-string name))]
         (cond
           (nil? line-string) nil
           col {:line line :col col}
@@ -94,21 +130,14 @@
   source location in the coor vector form used by the cider debugger."
   [frame cenv]
   (let [js-file (js-file-of-frame frame cenv)
-        loc (->> frame :location ((juxt :line-number :column-number)))
+        [line col] (->> frame :location ((juxt :line-number :column-number)))
 
-        sourcemap-file (source-map-of-js-file js-file)
         closure-js-file (-> @cenv :cljs.closure/compiled-cljs (get (.getCanonicalPath js-file)))
         ;; source-map-cljs-name (.getName (io/file (:source-url closure-js-file)))
         ;; script-id (-> frame :location :script-id)
         ;; call-frame-id (->> frame :call-frame-id)
 
-        sm (json/read-json (slurp sourcemap-file) true)
-        {:keys [line col name] :as cljs-loc} (apply source-map-lookup (sm/decode sm) loc)
-        _ (println name [line col])
-        [line col] (if-let [{:keys [line col]} (and name (find-more-precise-loc-logged (:url closure-js-file) line name))]
-                     [line col]
-                     [line col])
-        _ (println "vs" [line col])
+        {:keys [line col] :as cljs-loc} (source-map-lookup-from-file js-file line col)
         ns-ast (ana-api/find-ns cenv (:ns closure-js-file))
         ;; NOTE! defs in cljs have one-indexed lines!
         defs (sort-by (comp - :line) (vals (:defs ns-ast)))
@@ -259,8 +288,56 @@
   (a/go (a/<! (a/timeout 500))
         (enable debugging-state)))
 
+;; -=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+
+(def exclude-vars-with-prefix ["G__" "c__" "temp__" "i__" "count__" "chunk__" "seq__"])
+
+(defn- demunge [var]
+  (update var :name #(s/replace % "_" "-")))
+
+(defn locals
+  [frame-info {:keys [chrome-connection] :as _debugging-state}]
+  (let [object-id (-> frame-info :frame :scope-chain first :object :object-id)
+        vars (runtime/get-properties chrome-connection {:object-id object-id :generate-preview true})
+        vars-filtered-1 (for [var (:result vars)
+                              :let [name (:name var)]
+                              :when (not-any? #(.startsWith name %) exclude-vars-with-prefix)
+                              :let [[_ running-var-name running-var-n] (re-find #"(.*)_([0-9]{3,})$" name)]]
+                          (if running-var-name
+                            {:running-var running-var-name
+                             :n running-var-n
+                             :var var}
+                            var))
+        groups-of-running-vars (group-by :running-var vars-filtered-1)
+        normal-vars (get groups-of-running-vars nil)
+        running-vars (for [[name vars] (dissoc groups-of-running-vars nil)
+                           :let [used (filter #(not= {:type "undefined"} (-> % :var :value)) vars)
+                                 {:keys [var n]} (if (= 1 (count used)) (first used) (last (sort-by :n vars)))]]
+                       (assoc var
+                              :name name
+                              :running-var n))]
+    (into {} (for [var (concat running-vars normal-vars)
+                   :let [{{:keys [description type]} :value :keys [name]} (demunge var)]]
+               [name (or description type)]))))
+
 
 (comment
+
+  
+
+  (def chrome-connection (-> @@cljs-debugger.nrepl-cljs-debugger/last-devtools-session
+                             (get #'cljs-debugger.nrepl-cljs-debugger/*devtools-connection*)
+                             :chrome-connection))
+
+  (def dbg-state (-> @@cljs-debugger.nrepl-cljs-debugger/last-devtools-session
+                     (get #'cljs-debugger.nrepl-cljs-debugger/*devtools-connection*)))
+  
+  (def frame-info (-> @@cljs-debugger.nrepl-cljs-debugger/last-devtools-session (get #'cljs-debugger.nrepl-cljs-debugger/*last-break*)))
+
+  (locals frame-info dbg-state)
+
+  ;; (re-find #"(.*)_([0-9]{3,})$" "col_63392")
+  (->> vars :result (filter (fn [var] (not-any? (.startsWith (:name %) )))))
 
   (disconnect!)
   (connect!)
